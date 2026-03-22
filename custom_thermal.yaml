@@ -1,0 +1,10 @@
+# Custom thermal dataset from GuardianAire drone recordings
+# Labeled in Roboflow, converted to YOLO format
+# 92 images from actual Autel drone thermal camera
+
+path: datasets/custom-thermal
+train: images/train
+val: images/val
+
+names:
+  0: Person
