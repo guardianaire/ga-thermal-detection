@@ -1,0 +1,14 @@
+# HIT-UAV dataset config for Ultralytics YOLO
+# High-altitude infrared thermal dataset from UAV perspective
+# https://github.com/suojeong/HIT-UAV
+
+path: datasets/hit-uav/raw/normal  # dataset root
+train: images/train
+val: images/val
+test: images/test
+
+# Classes - we primarily care about Person (class 0)
+names:
+  0: Person
+  1: Car
+  2: Bicycle
