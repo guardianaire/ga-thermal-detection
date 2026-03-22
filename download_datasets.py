@@ -41,7 +41,7 @@ def download_hit_uav():
     # Clone the HIT-UAV repo (contains images + YOLO annotations)
     subprocess.run([
         "git", "clone", "--depth", "1",
-        "https://github.com/suojeong/HIT-UAV.git",
+        "https://github.com/suojiashun/HIT-UAV-Infrared-Thermal-Dataset.git",
         str(dest / "raw")
     ], check=True)
 
