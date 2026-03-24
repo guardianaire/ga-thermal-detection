@@ -33,6 +33,12 @@ weights/
 .DS_Store
 Thumbs.db
 
+# Certificates (private keys)
+certs/
+
+# Downloaded drone recordings (large video files)
+downloads/
+
 # Logs
 *.log
 wandb/

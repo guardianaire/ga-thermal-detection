@@ -1,0 +1,11 @@
+datasets/
+downloads/
+runs/
+data/
+.git/
+.venv/
+venv/
+__pycache__/
+*.ipynb
+*.md
+.ipynb_checkpoints/
