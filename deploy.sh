@@ -20,6 +20,7 @@ ACR_SERVER="${ACR_NAME}.azurecr.io"
 IMAGE_NAME="ga-thermal-detect"
 IMAGE_TAG="latest"
 CONTAINER_NAME="ga-thermal-detect"
+STORAGE_ACCOUNT="guardianairevidstore"
 
 ACTION="${1:-all}"
 
@@ -52,8 +53,9 @@ fi
 
 # Deploy
 if [[ "$ACTION" == "all" || "$ACTION" == "deploy" ]]; then
-    echo "--- Fetching ACR credentials ---"
+    echo "--- Fetching credentials ---"
     ACR_PASSWORD=$(az acr credential show --name "$ACR_NAME" --query "passwords[0].value" -o tsv)
+    STORAGE_CONN_STR=$(az storage account show-connection-string --name "$STORAGE_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query connectionString -o tsv)
 
     echo "--- Deploying container instance ---"
 
@@ -74,6 +76,7 @@ if [[ "$ACTION" == "all" || "$ACTION" == "deploy" ]]; then
         --cpu 2 \
         --memory 4 \
         --restart-policy Always \
+        --environment-variables AZURE_STORAGE_CONNECTION_STRING="$STORAGE_CONN_STR" \
         -o table
 
     echo ""

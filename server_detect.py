@@ -5,6 +5,7 @@ Reads frames from the HLS stream served by the nginx-rtmp container,
 runs YOLO inference, and pushes detections to:
   1. SignalR broadcast → front-end mobile app
   2. MQTT (Event Grid) → Autel remote controller app
+  3. Azure Blob Storage → annotated detection snapshots
 
 Architecture:
   Drone → RTMP → nginx-rtmp container → HLS stream
@@ -13,6 +14,7 @@ Architecture:
                                            ↓
                               SignalR broadcast → mobile app
                               MQTT publish     → controller app
+                              Blob snapshots   → review & training
 
 Usage:
   # With default HLS URL and model
@@ -26,6 +28,9 @@ Usage:
 
   # Disable MQTT (SignalR only)
   python server_detect.py --no-mqtt
+
+  # Disable snapshots
+  python server_detect.py --no-snapshots
 """
 
 import argparse
@@ -34,7 +39,9 @@ import logging
 import os
 import ssl
 import time
+import threading
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
@@ -57,8 +64,20 @@ MQTT_PORT = 8883
 MQTT_CLIENT_ID = "client4-authnID"
 MQTT_TOPIC = "api/status/custom-detections"
 
+# Snapshot storage
+SNAPSHOT_STORAGE_ACCOUNT = "guardianairevidstore"
+SNAPSHOT_CONTAINER = "detections"
+
 # Detection class names (must match training)
 CLASS_NAMES = {0: "person", 1: "car", 2: "bicycle"}
+
+# Colors (BGR) for bounding boxes on snapshots
+BBOX_COLORS = {
+    "person": (0, 255, 0),
+    "car": (255, 165, 0),
+    "bicycle": (255, 255, 0),
+    "unknown": (128, 128, 128),
+}
 
 
 class MqttPublisher:
@@ -111,6 +130,118 @@ class MqttPublisher:
     def stop(self):
         self.client.loop_stop()
         self.client.disconnect()
+
+
+class SnapshotUploader:
+    """Uploads annotated detection frames to Azure Blob Storage.
+
+    Throttles uploads to at most one every `interval` seconds to avoid
+    flooding storage during sustained detection periods.
+    """
+
+    def __init__(self, connection_string: str, container_name: str,
+                 interval: float = 5.0, min_confidence: float = 0.50):
+        from azure.storage.blob import BlobServiceClient, ContentSettings
+
+        self.container_name = container_name
+        self.interval = interval
+        self.min_confidence = min_confidence
+        self.last_upload_time = 0.0
+        self.upload_count = 0
+        self._content_settings = ContentSettings(content_type="image/png")
+
+        # Each detection session gets its own folder (timestamped at start)
+        self.session_prefix = datetime.now(timezone.utc).strftime("session_%Y%m%d_%H%M%S")
+
+        self.blob_service = BlobServiceClient.from_connection_string(connection_string)
+        # Ensure container exists
+        try:
+            self.blob_service.create_container(container_name)
+            log.info(f"Created blob container: {container_name}")
+        except Exception:
+            pass  # Already exists
+
+        log.info(f"Snapshots: container={container_name}/{self.session_prefix}/, "
+                 f"interval={interval}s, min_confidence={min_confidence:.0%}")
+
+    def maybe_upload(self, frame, raw_detections, frame_count):
+        """Upload an annotated snapshot if enough time has passed and confidence is high enough.
+
+        Args:
+            frame: Original BGR frame from the stream
+            raw_detections: List of dicts with class_id, confidence, bbox (pixel coords)
+            frame_count: Current frame number
+        """
+        # Filter to high-confidence detections
+        high_conf = [d for d in raw_detections if d["confidence"] >= self.min_confidence]
+        if not high_conf:
+            return
+
+        now = time.monotonic()
+        if now - self.last_upload_time < self.interval:
+            return
+
+        self.last_upload_time = now
+
+        # Draw bounding boxes on frame copy
+        annotated = draw_detection_boxes(frame, high_conf)
+
+        # Encode as PNG
+        _, png_buf = cv2.imencode(".png", annotated)
+
+        # Upload in background thread to avoid blocking detection loop
+        ts = datetime.now(timezone.utc)
+        best = max(high_conf, key=lambda d: d["confidence"])
+        blob_name = (f"{self.session_prefix}/"
+                     f"det_{ts.strftime('%H%M%S')}_"
+                     f"{best['class_name']}_{best['confidence']:.0%}.png")
+
+        thread = threading.Thread(
+            target=self._upload_blob,
+            args=(blob_name, png_buf.tobytes()),
+            daemon=True,
+        )
+        thread.start()
+        self.upload_count += 1
+
+    def _upload_blob(self, blob_name, data):
+        try:
+            blob_client = self.blob_service.get_blob_client(
+                container=self.container_name, blob=blob_name)
+            blob_client.upload_blob(data, overwrite=True,
+                                    content_settings=self._content_settings)
+            log.info(f"Snapshot uploaded: {self.container_name}/{blob_name}")
+        except Exception as e:
+            log.warning(f"Snapshot upload failed: {e}")
+
+
+def draw_detection_boxes(frame, detections):
+    """Draw bounding boxes with confidence labels on a frame copy.
+
+    Args:
+        frame: BGR numpy array
+        detections: List of dicts with class_name, confidence, bbox (x1,y1,x2,y2 pixels)
+    """
+    annotated = frame.copy()
+    for det in detections:
+        cls_name = det["class_name"]
+        conf = det["confidence"]
+        x1, y1, x2, y2 = [int(v) for v in det["bbox"]]
+        color = BBOX_COLORS.get(cls_name, BBOX_COLORS["unknown"])
+
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+
+        label = f"{cls_name} {conf:.0%}"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        thickness = 1
+        (tw, th), _ = cv2.getTextSize(label, font, font_scale, thickness)
+
+        label_y = max(y1 - 6, th + 4)
+        cv2.rectangle(annotated, (x1, label_y - th - 4), (x1 + tw + 4, label_y + 2), color, -1)
+        cv2.putText(annotated, label, (x1 + 2, label_y - 2), font, font_scale, (0, 0, 0), thickness)
+
+    return annotated
 
 
 def send_detections_signalr(detections: list, broadcast_url: str):
@@ -215,10 +346,28 @@ def run_detection_loop(args):
         except Exception as e:
             log.warning(f"MQTT setup failed (continuing with SignalR only): {e}")
 
+    # Set up snapshot uploader
+    snapshot_uploader = None
+    if not args.no_snapshots:
+        conn_str = os.environ.get("AZURE_STORAGE_CONNECTION_STRING", "")
+        if conn_str:
+            try:
+                snapshot_uploader = SnapshotUploader(
+                    connection_string=conn_str,
+                    container_name=args.snapshot_container,
+                    interval=args.snapshot_interval,
+                    min_confidence=args.snapshot_min_conf,
+                )
+            except Exception as e:
+                log.warning(f"Snapshot setup failed (continuing without): {e}")
+        else:
+            log.warning("Snapshots enabled but AZURE_STORAGE_CONNECTION_STRING not set — skipping")
+
     log.info(f"Connecting to HLS stream: {args.hls_url}")
     log.info(f"Target FPS: {args.fps}, confidence threshold: {args.conf}")
     log.info(f"SignalR: {args.broadcast_url}")
     log.info(f"MQTT: {'enabled' if mqtt_pub else 'disabled'}")
+    log.info(f"Snapshots: {'enabled' if snapshot_uploader else 'disabled'}")
 
     frame_interval = 1.0 / args.fps
     consecutive_failures = 0
@@ -265,7 +414,8 @@ def run_detection_loop(args):
                 inference_ms = (time.perf_counter() - t0) * 1000
 
                 # Extract detections
-                detections = []
+                detections = []      # Normalized (for SignalR/MQTT)
+                raw_detections = []  # Pixel coords (for snapshots)
                 for r in results:
                     h, w = r.orig_shape
                     for box in r.boxes:
@@ -274,11 +424,18 @@ def run_detection_loop(args):
                         xyxy = box.xyxy[0].tolist()
                         det = format_detection(cls_id, conf, xyxy, w, h)
                         detections.append(det)
+                        raw_detections.append({
+                            "class_name": CLASS_NAMES.get(cls_id, "unknown"),
+                            "confidence": conf,
+                            "bbox": xyxy,
+                        })
 
                 if detections:
                     detection_count += len(detections)
                     send_detections_signalr(detections, args.broadcast_url)
                     send_detections_mqtt(detections, mqtt_pub)
+                    if snapshot_uploader:
+                        snapshot_uploader.maybe_upload(frame, raw_detections, frame_count)
                     log.info(f"Frame {frame_count}: {len(detections)} detections "
                             f"({inference_ms:.0f}ms inference)")
                     for det in detections:
@@ -335,6 +492,16 @@ def main():
                        help="Path to MQTT client certificate")
     parser.add_argument("--mqtt-key", default="/app/certs/client4.key",
                        help="Path to MQTT client private key")
+
+    # Snapshot options
+    parser.add_argument("--no-snapshots", action="store_true",
+                       help="Disable snapshot uploads to blob storage")
+    parser.add_argument("--snapshot-container", default=SNAPSHOT_CONTAINER,
+                       help=f"Blob container for snapshots (default: {SNAPSHOT_CONTAINER})")
+    parser.add_argument("--snapshot-interval", type=float, default=5.0,
+                       help="Min seconds between snapshot uploads (default: 5)")
+    parser.add_argument("--snapshot-min-conf", type=float, default=0.50,
+                       help="Min confidence to trigger snapshot (default: 0.50)")
 
     args = parser.parse_args()
 
