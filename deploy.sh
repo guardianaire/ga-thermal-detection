@@ -55,7 +55,7 @@ fi
 if [[ "$ACTION" == "all" || "$ACTION" == "deploy" ]]; then
     echo "--- Fetching credentials ---"
     ACR_PASSWORD=$(az acr credential show --name "$ACR_NAME" --query "passwords[0].value" -o tsv)
-    STORAGE_CONN_STR=$(az storage account show-connection-string --name "$STORAGE_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query connectionString -o tsv)
+    STORAGE_CONN_STR=$(az storage account show-connection-string --name "$STORAGE_ACCOUNT" --query connectionString -o tsv)
 
     echo "--- Deploying container instance ---"
 
