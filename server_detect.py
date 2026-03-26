@@ -363,7 +363,9 @@ def run_detection_loop(args):
         else:
             log.warning("Snapshots enabled but AZURE_STORAGE_CONNECTION_STRING not set — skipping")
 
-    log.info(f"Connecting to HLS stream: {args.hls_url}")
+    stream_url = args.stream_url
+    is_rtmp = stream_url.startswith("rtmp://")
+    log.info(f"Connecting to {'RTMP' if is_rtmp else 'HLS'} stream: {stream_url}")
     log.info(f"Target FPS: {args.fps}, confidence threshold: {args.conf}")
     log.info(f"SignalR: {args.broadcast_url}")
     log.info(f"MQTT: {'enabled' if mqtt_pub else 'disabled'}")
@@ -372,18 +374,24 @@ def run_detection_loop(args):
     frame_interval = 1.0 / args.fps
     consecutive_failures = 0
 
+    # Low-latency ffmpeg options for RTMP (minimize buffering)
+    if is_rtmp:
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "fflags;nobuffer|flags;low_delay|analyzeduration;0|probesize;32768"
+
     try:
         while True:
-            cap = cv2.VideoCapture(args.hls_url)
+            cap = cv2.VideoCapture(stream_url)
+            if is_rtmp:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
             if not cap.isOpened():
                 consecutive_failures += 1
-                log.warning(f"Cannot open HLS stream (attempt {consecutive_failures}), retrying in 5s...")
+                log.warning(f"Cannot open stream (attempt {consecutive_failures}), retrying in 5s...")
                 time.sleep(5)
                 continue
 
             consecutive_failures = 0
-            log.info("Connected to HLS stream!")
+            log.info(f"Connected to {'RTMP' if is_rtmp else 'HLS'} stream!")
 
             stream_fps = cap.get(cv2.CAP_PROP_FPS) or 24
             frame_skip = max(1, int(stream_fps / args.fps))
@@ -393,7 +401,7 @@ def run_detection_loop(args):
             while True:
                 ret, frame = cap.read()
                 if not ret:
-                    log.warning("Lost HLS stream, reconnecting...")
+                    log.warning("Lost stream, reconnecting...")
                     break
 
                 frame_count += 1
@@ -463,9 +471,12 @@ def run_detection_loop(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Server-side thermal person detection")
+    parser.add_argument("--stream-url",
+                       default="rtmp://ga-drone-stream.eastus.azurecontainer.io/live/drone1",
+                       help="Video stream URL (RTMP for low-latency, HLS for compatibility)")
     parser.add_argument("--hls-url",
-                       default="http://ga-drone-stream.eastus.azurecontainer.io:8080/hls/drone1.m3u8",
-                       help="HLS stream URL")
+                       default=None,
+                       help="(deprecated) Alias for --stream-url")
     parser.add_argument("--model", default="thermal_person_best.pt",
                        help="YOLO model path (.pt or .tflite)")
     parser.add_argument("--imgsz", type=int, default=640,
@@ -504,6 +515,10 @@ def main():
                        help="Min confidence to trigger snapshot (default: 0.50)")
 
     args = parser.parse_args()
+
+    # Support deprecated --hls-url flag (overrides --stream-url if provided)
+    if args.hls_url:
+        args.stream_url = args.hls_url
 
     run_detection_loop(args)
 

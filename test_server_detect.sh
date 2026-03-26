@@ -9,7 +9,7 @@
 set -euo pipefail
 
 MODEL=${1:-"thermal_person_best.pt"}
-HLS_URL="http://ga-drone-stream.eastus.azurecontainer.io:8080/hls/drone1.m3u8"
+RTMP_URL="rtmp://ga-drone-stream.eastus.azurecontainer.io/live/drone1"
 
 if [ ! -f "$MODEL" ]; then
     echo "Model not found: $MODEL"
@@ -21,7 +21,7 @@ fi
 
 echo "=== Server-Side Thermal Detection Test ==="
 echo "Model: $MODEL"
-echo "Stream: $HLS_URL"
+echo "Stream: $RTMP_URL"
 echo "FPS: 2"
 echo ""
 echo "Press Ctrl+C to stop"
@@ -30,7 +30,7 @@ echo ""
 source .venv/bin/activate 2>/dev/null || true
 
 python server_detect.py \
-    --hls-url "$HLS_URL" \
+    --stream-url "$RTMP_URL" \
     --model "$MODEL" \
     --fps 2 \
     --conf 0.25 \
